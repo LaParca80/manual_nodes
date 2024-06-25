@@ -2,6 +2,7 @@ import json
 import torch
 import numpy as np
 from PIL import Image, ImageOps
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from io import BytesIO
 import base64
@@ -95,38 +96,39 @@ class Layer:
 ###############################################################################################################
 
 class Output:
-
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required": 
-                {
-                    "result": (any, {}),
-                }
-             }
-    
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "result": (any, {}),
+            }
+        }
 
     RETURN_TYPES = ()
     FUNCTION = "OnResult"
     OUTPUT_NODE = True
     CATEGORY = "Manual"
 
-    def OnResult(self, result):
-        results = []
-        for tensor in result:
-            array = 255.0 * tensor.cpu().numpy()
-            image = Image.fromarray(np.clip(array, 0, 255).astype(np.uint8))
-
-            server = PromptServer.instance
+    def process_tensor(self, tensor, server):
+        try:
+            array = (tensor.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            image = Image.fromarray(array)
+                
             server.send_sync(
                 BinaryEventTypes.UNENCODED_PREVIEW_IMAGE,
                 ["PNG", image, None],
                 server.client_id,
             )
-            
-            results.append(
-                {"source": "websocket", "content-type": "image/png", "type": "output"}
-            )
+            return {"source": "websocket", "content-type": "image/png", "type": "output"}
+        except Exception as e:
+            print(f"Error processing tensor: {e}")
+            return None
 
+    def OnResult(self, result):
+        server = PromptServer.instance
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(self.process_tensor, tensor, server) for tensor in result]
+            results = [future.result() for future in as_completed(futures) if future.result()]
         return {"ui": {"images": results}}
 
 
